@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, Integer, String, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 
 Base = declarative_base()
@@ -19,6 +19,7 @@ class AirDropLog(Base):
     airdrop_day = Column(Integer, default=None)
     memo = Column(String, default=None)
     eth_tid = Column(String, default=None)
+    __table_args__ = (UniqueConstraint("pubkey", "trx_id", "airdrop_type"),)
 
 
 class TargetTrxs(Base):

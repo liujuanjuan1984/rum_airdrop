@@ -17,24 +17,24 @@ AIRDROPS = {
     "FIRST_DAILY": 30,
     "LIKE": 20,
     "COMMENT": 100,
-    "LIKED": 50,
+    "LIKED": 0,
     "OWNER_POST": 300,
     "OWNER_COMMENT": 50,
 }
-
-DAILY_LIMIT = 1000
 
 
 class AirDropBot:
     def __init__(
         self,
-        seed,
-        db_url,
-        contract_address,
-        pvtkey,
-        start_trx,
-        target_pubkeys,
-        start_at="2023-05-13T22:20",
+        seed: str,
+        db_url: str,
+        contract_address: str,
+        pvtkey: str,
+        start_trx: str,
+        target_pubkeys: list,
+        start_at: str = "2023-05-13T22:20",
+        daily_limit: int = 1000,
+        airdrop_map: dict = None,
     ):
         self.db = DBHandle(db_url)
         self.erc20 = RumERC20Instance(contract_address, pvtkey=pvtkey)
@@ -42,6 +42,8 @@ class AirDropBot:
         self.rum = MiniNode(seed, pvtkey)
         self.target_pubkeys = target_pubkeys
         self.start_at = start_at
+        self.daily_limit = daily_limit
+        self.airdrop_map = airdrop_map or AIRDROPS
 
     def run(self):
         while True:
@@ -53,7 +55,7 @@ class AirDropBot:
                 self.start_trx = trx["TrxId"]
                 self.handle_trx(trx)
 
-    def get_day(self, trx):
+    def get_day(self, trx: dict):
         trx_ts = int(str(trx["TimeStamp"])[:10])
         dt_trx = datetime.datetime.utcfromtimestamp(trx_ts)
         dt_start = datetime.datetime.strptime(self.start_at, "%Y-%m-%dT%H:%M")
@@ -67,10 +69,10 @@ class AirDropBot:
         today = 1 + (today_dt - dt_start).days
         return today
 
-    def handle_trx(self, trx):
+    def handle_trx(self, trx: dict):
         pubkey = trx["SenderPubkey"]
         trx_type = get_trx_type(trx)
-        logger.info("trx %s %s", trx["TrxId"], trx_type)
+        logger.info("trx: %s type: %s", trx["TrxId"], trx_type)
         if trx_type not in ["post", "comment", "counter", "relation"]:
             return
         try:
@@ -80,53 +82,45 @@ class AirDropBot:
             logger.info(err)
             post_id = None
 
+        who = "owner" if pubkey in self.target_pubkeys else "user"
         _taget = {
             "trx_id": trx["TrxId"],
             "pubkey": pubkey,
             "post_id": post_id,
-            "who": "owner",
+            "who": who,
         }
 
-        do_log = False
+        airdrop_type = None
         target_id = post_id
         # the post and comment that owner posted.
-        if pubkey in self.target_pubkeys:
+        if who == "owner":
             if trx_type in ["post", "comment"]:
-                self.db.add(TargetTrxs, _taget)
+                self.db.add_target(_taget)
                 airdrop_type = "OWNER_" + trx_type.upper()
-                do_log = True
-            elif trx_type in ["counter"]:  # liked by owner
-                self.db.add(
-                    TargetTrxs, {"post_id": trx["Data"]["object"]["id"], "who": "user"}
-                )
-                logger.info("user add target %s", trx["Data"]["object"]["id"])
+            elif trx_type == "counter":  # liked by owner
+                self.db.add_target({"post_id": post_id, "who": "user"})
         # the comment that owner liked.
-        elif post_id and trx_type in ["comment"] and self.db.is_target(post_id, "user"):
+        elif post_id and trx_type == "comment" and self.db.is_target(post_id, "user"):
             airdrop_type = "LIKED"
-            do_log = True
             _taget["who"] = "user"
             self.db.update(TargetTrxs, _taget, "post_id")
             logger.info("user update target %s %s", airdrop_type, post_id)
         # the like/comment that to owner post/comment
-        elif trx_type in ["counter"]:
+        elif trx_type == "counter":
             try:
-                target_id = trx["Data"]["object"]["id"]
-            except Exception as err:
                 target_id = trx["Data"]["object"]["object"]["id"]
-                logger.warning("trx %s has no target_id", trx["TrxId"])
+            except Exception as err:
                 logger.info(err)
-            if target_id and self.db.is_target(target_id, "owner"):
+            if self.db.is_target(target_id, "owner"):
                 airdrop_type = "LIKE"
-                do_log = True
-        elif trx_type in ["comment"]:
+        elif trx_type == "comment":
             target_id = trx["Data"]["object"]["inreplyto"]["id"]
             if self.db.is_target(target_id, "owner"):
                 airdrop_type = "COMMENT"
-                do_log = True
 
         day = self.get_day(trx)
-        if do_log:
-            _target = {
+        if airdrop_type:
+            _log = {
                 "trx_id": trx["TrxId"],
                 "pubkey": pubkey,
                 "address": account.pubkey_to_address(pubkey),
@@ -135,24 +129,16 @@ class AirDropBot:
             }
 
             if self.db.is_first_ever(pubkey):
-                _target.update(
-                    {"amount": AIRDROPS["FIRST_EVER"], "airdrop_type": "FIRST_EVER"}
-                )
-                self.db.add(AirDropLog, _target)
-                logger.info("first ever %s", pubkey)
+                self._add_log(_log, "FIRST_EVER")
             if self.db.is_first_daily(pubkey, day):
-                _target.update(
-                    {"amount": AIRDROPS["FIRST_DAILY"], "airdrop_type": "FIRST_DAILY"}
-                )
-                self.db.add(AirDropLog, _target)
-                logger.info("first daily %s", pubkey)
-            _target.update(
-                {"amount": AIRDROPS[airdrop_type], "airdrop_type": airdrop_type}
-            )
-            self.db.add(AirDropLog, _target)
-            logger.info(
-                "airdrop log %s %s %s", pubkey, airdrop_type, AIRDROPS[airdrop_type]
-            )
+                self._add_log(_log, "FIRST_DAILY")
+
+            self._add_log(_log, airdrop_type)
+
+    def _add_log(self, _log: dict, airdrop_type: str):
+        _log["airdrop_type"] = airdrop_type
+        _log["amount"] = self.airdrop_map.get(airdrop_type, 0)
+        self.db.add_log(_log)
 
     async def airdrop(self):
         today = self.get_today()
@@ -160,10 +146,14 @@ class AirDropBot:
             logger.info("not ready yet %s", today)
             return
         for day in range(1, today + 1):
-            logger.info("airdrop day %s", day)
+            done_sum = self.db.get_airdroped_sum(day)
+            logger.info("day %s already airdroped %s", day, done_sum)
             for todo in self.db.get_airdrop_todo(day):
                 logger.info("to airdrop %s %s", todo.pubkey, todo.amount)
-                if self.db.get_day_sum(todo.pubkey, day) > DAILY_LIMIT:
+                if (
+                    self.daily_limit
+                    and self.db.get_day_sum(todo.pubkey, day) > self.daily_limit
+                ):
                     logger.info("daily limit %s", todo.pubkey)
                     self.db.update(
                         AirDropLog, {"eth_tid": "dailylimit", "id": todo.id}, "id"
