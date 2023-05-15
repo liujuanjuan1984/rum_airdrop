@@ -1,0 +1,4 @@
+quorum-eth-py 
+quorum_data_py
+quorum_mininode_py
+sqlalchemy
